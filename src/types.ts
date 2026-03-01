@@ -151,3 +151,6 @@ export interface VerticalFormatConfig {
   /** Output frame rate */
   frameRate: number;
 }
+
+/** Layout for podcast split-screen mode */
+export type PodcastLayout = "top-bottom" | "left-right";

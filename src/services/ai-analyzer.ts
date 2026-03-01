@@ -48,16 +48,33 @@ export async function analyzeTranscript(
 
   logger.debug("Sending request to Groq API…");
 
-  const completion = await client.chat.completions.create({
-    model: config.model,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    temperature: 0.3,
-    max_tokens: 4096,
-    response_format: { type: "json_object" },
-  });
+  let completion;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      completion = await client.chat.completions.create({
+        model: config.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.3,
+        max_tokens: 2048,
+        response_format: { type: "json_object" },
+      });
+      break; // success
+    } catch (err: unknown) {
+      const apiErr = err as { status?: number; headers?: Record<string, string> };
+      if ((apiErr.status === 413 || apiErr.status === 429) && attempt < 3) {
+        const retryAfter = parseInt(apiErr.headers?.["retry-after"] ?? "60", 10);
+        logger.warn(`Rate limited (attempt ${attempt}/3). Waiting ${retryAfter}s…`);
+        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  if (!completion) throw new Error("Groq API failed after 3 attempts");
 
   const raw = completion.choices[0]?.message?.content ?? "";
   const tokensUsed = completion.usage?.total_tokens ?? 0;
@@ -97,25 +114,29 @@ export async function analyzeTranscript(
 // ────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(config: AIConfig): string {
-  return `You are an expert viral content analyst and short-form video creator.
-Your job is to analyze video transcripts and identify the most engaging, 
-shareable, or potentially viral moments suitable for short clips (TikTok, 
-YouTube Shorts, Instagram Reels).
+  return `You are an elite viral content strategist who creates clips for TikTok, YouTube Shorts, and Instagram Reels with millions of views.
 
-You understand what makes content go viral:
-- Emotional hooks (shock, humor, inspiration, controversy)
-- Strong opening lines that grab attention in the first 2 seconds
-- Complete stories or thoughts within the clip duration
-- Relatable or highly debatable statements
-- Expert insights or "aha moments"
-- Dramatic reveals or unexpected turns
+Your #1 RULE: The first 2-3 seconds of every clip MUST instantly hook the viewer. The opening line must make someone STOP SCROLLING.
 
-IMPORTANT RULES:
-- Each clip MUST be between ${config.minClipDuration} and ${config.maxClipDuration} seconds long.
-- Clips MUST NOT overlap with each other.
-- Start times must align to natural speech boundaries (not mid-sentence).
-- End times must feel like a natural conclusion (not abrupt cuts).
-- Respond ONLY with valid JSON. No markdown, no explanation outside JSON.`;
+What makes a clip go VIRAL:
+1. KILLER HOOK AT THE START — The clip opens with a shocking statement, bold claim, emotional outburst, provocative question, or mind-blowing fact. NOT a boring intro.
+2. EMOTIONAL PUNCH — Humor, shock, vulnerability, anger, controversy, deep relatability.
+3. COMPLETE STORY ARC — Each clip tells a full micro-story: setup → tension → payoff. No awkward cuts mid-thought.
+4. QUOTABLE MOMENTS — Lines viewers will screenshot, share, and debate in comments.
+5. DRAMATIC TURNS — Unexpected reveals, comebacks, confessions, or perspective shifts.
+
+What makes a clip FAIL (AVOID these):
+- Starting with "so..." or slow introductions
+- Generic advice without emotional weight
+- Incomplete thoughts or abrupt endings
+- Boring transitions or filler content
+
+RULES:
+- Clip duration: ${config.minClipDuration}–${config.maxClipDuration} seconds. Use whatever length fits the moment — short punchy clips AND longer story clips are both valid.
+- The HOOK must be in the first 3 seconds. Start the clip 1-2 seconds before the hook for natural flow.
+- End at a natural conclusion or cliffhanger — never mid-sentence.
+- Clips MUST NOT overlap.
+- Respond ONLY with valid JSON.`;
 }
 
 function buildUserPrompt(
@@ -124,7 +145,7 @@ function buildUserPrompt(
   totalDuration: number,
   config: AIConfig,
 ): string {
-  return `Analyze this video transcript and find the top ${config.maxClips} most viral-worthy moments.
+  return `Find the top ${config.maxClips} most VIRAL moments from this video.
 
 VIDEO TITLE: "${videoTitle}"
 TOTAL DURATION: ${Math.round(totalDuration)} seconds
@@ -134,26 +155,31 @@ TRANSCRIPT (with timestamps):
 ${formattedTranscript}
 ---
 
-Return a JSON object with this exact structure:
+INSTRUCTIONS:
+1. Find moments where the speaker says something SHOCKING, FUNNY, CONTROVERSIAL, DEEPLY EMOTIONAL, or MIND-BLOWING.
+2. Each clip MUST start with a strong hook — the very first line should make viewers stop scrolling. Start 1-2 seconds BEFORE the hook moment so the clip flows naturally.
+3. Duration: ${config.minClipDuration}–${config.maxClipDuration} seconds per clip. Match the duration to the moment — 30s for quick punchy moments, 1-3 minutes for compelling stories. Don't force moments to be shorter than they need to be.
+4. QUALITY > QUANTITY. Only include genuinely viral-worthy moments. Skip filler, transitions, and generic advice.
+5. The "hook" field MUST be the OPENING line/moment of the clip (what the viewer hears first), not just any interesting quote from the middle.
+6. The "title" should be clickbait-worthy — make people curious.
+
+Return JSON:
 {
   "clips": [
     {
-      "startTime": <number in seconds>,
-      "endTime": <number in seconds>,
-      "title": "<catchy short title for the clip, max 60 chars>",
-      "viralScore": <1-10 integer>,
-      "reason": "<why this moment could go viral, 1-2 sentences>",
-      "hook": "<the key quote or moment that hooks viewers, max 100 chars>"
+      "startTime": <seconds>,
+      "endTime": <seconds>,
+      "title": "<clickbait title, max 60 chars>",
+      "viralScore": <1-10>,
+      "reason": "<why this will go viral, 1-2 sentences>",
+      "hook": "<the OPENING LINE that hooks viewers, max 100 chars>"
     }
   ]
 }
 
-Requirements:
-- Return exactly ${config.maxClips} clips (or fewer if the video is too short).
-- Clip duration: ${config.minClipDuration}-${config.maxClipDuration} seconds each.
-- Sort by viralScore descending (best first).
-- No overlapping clips.
-- Ensure startTime and endTime exist within the transcript.`;
+Sort by viralScore descending. No overlapping clips.
+Only include clips scoring 6+ (truly viral-worthy).
+Ensure timestamps exist within the transcript.`;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -163,12 +189,41 @@ Requirements:
 /**
  * Format transcript segments into a readable text with timestamps
  * that the LLM can understand and reference.
+ * For long videos, intelligently samples segments to fit within token limits.
  */
 function formatTranscriptForLLM(transcript: VideoTranscript): string {
+  // Groq free tier: 12K TPM. With system+user prompt (~1500 tokens) + max_tokens 2048,
+  // we need transcript input under ~8000 tokens ≈ 20000 chars.
+  const MAX_CHARS = 18000;
+
+  let segments = transcript.segments;
+
+  // For very long transcripts, sample evenly across the full video
+  // to ensure we cover the entire duration, not just the first part
+  const fullText = segments.map(s => s.text).join(" ");
+  if (fullText.length > MAX_CHARS * 1.5) {
+    // Calculate how many segments we can keep
+    const avgSegChars = fullText.length / segments.length;
+    const targetSegments = Math.floor(MAX_CHARS / (avgSegChars + 15)); // +15 for timestamp markers
+    const step = Math.max(1, Math.floor(segments.length / targetSegments));
+
+    logger.info(`Long transcript (${segments.length} segments, ${fullText.length} chars) → sampling every ${step}th segment`);
+
+    const sampled = [];
+    for (let i = 0; i < segments.length; i += step) {
+      sampled.push(segments[i]);
+    }
+    // Always include last segment for duration reference
+    if (sampled[sampled.length - 1] !== segments[segments.length - 1]) {
+      sampled.push(segments[segments.length - 1]);
+    }
+    segments = sampled;
+  }
+
   const lines: string[] = [];
   let lastTime = -1;
 
-  for (const seg of transcript.segments) {
+  for (const seg of segments) {
     // Add timestamp markers every ~30 seconds
     const marker = Math.floor(seg.start / 30) * 30;
     if (marker > lastTime) {
@@ -178,14 +233,12 @@ function formatTranscriptForLLM(transcript: VideoTranscript): string {
     lines.push(seg.text);
   }
 
-  // Truncate if too long (Groq context window safety)
-  const text = lines.join(" ");
-  const MAX_CHARS = 60000; // ~15K tokens, safe for 128K context models
+  let text = lines.join(" ");
+
+  // Final safety truncation
   if (text.length > MAX_CHARS) {
-    logger.warn(
-      `Transcript truncated from ${text.length} to ${MAX_CHARS} chars`,
-    );
-    return text.slice(0, MAX_CHARS) + "\n[…transcript truncated]";
+    logger.warn(`Transcript truncated from ${text.length} to ${MAX_CHARS} chars`);
+    text = text.slice(0, MAX_CHARS) + "\n[…transcript truncated]";
   }
 
   return text;
@@ -241,9 +294,9 @@ function parseLLMResponse(
     // Validation checks
     if (isNaN(startTime) || isNaN(endTime)) continue;
     if (startTime < 0 || endTime <= startTime) continue;
-    if (endTime > maxDuration + 5) continue; // small tolerance
-    if (duration < config.minClipDuration * 0.8) continue; // 20% tolerance
-    if (duration > config.maxClipDuration * 1.2) continue;
+    if (endTime > maxDuration + 10) continue; // small tolerance
+    if (duration < config.minClipDuration * 0.5) continue; // flexible tolerance
+    if (duration > config.maxClipDuration * 1.3) continue;
 
     // Check overlap with already-selected clips
     const overlaps = clips.some(

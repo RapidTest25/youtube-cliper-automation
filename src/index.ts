@@ -21,6 +21,7 @@ import { uploadVideo } from "./services/uploader.js";
 import { getTranscript, secondsToTimestamp } from "./services/transcript.js";
 import { analyzeTranscript } from "./services/ai-analyzer.js";
 import { formatVertical } from "./services/vertical-formatter.js";
+import { formatPodcast, DEFAULT_PODCAST_CONFIG } from "./services/podcast-formatter.js";
 import { addCaptions, DEFAULT_CAPTION_CONFIG } from "./services/caption.js";
 import { logger } from "./utils/logger.js";
 import { checkCommand } from "./utils/command.js";
@@ -36,6 +37,7 @@ const MODE = args.includes("--ai") ? "ai" : "csv";
 // AI mode defaults to vertical. Use --horizontal to override.
 const HORIZONTAL_OVERRIDE = args.includes("--horizontal") || args.includes("-h");
 const VERTICAL_FLAG = args.includes("--vertical") || args.includes("-v");
+const PODCAST_FLAG = args.includes("--podcast") || args.includes("-p");
 const VERTICAL = MODE === "ai" ? !HORIZONTAL_OVERRIDE : VERTICAL_FLAG;
 const NO_CAPTION = args.includes("--no-caption");
 const AI_URL = args.find((a) => a.startsWith("http"));
@@ -72,9 +74,10 @@ async function runAIPipeline(): Promise<void> {
   }
 
   if (!AI_URL) {
-    logger.error("Usage: npm run dev -- --ai [--horizontal] [--no-caption] <youtube-url>");
+    logger.error("Usage: npm run dev -- --ai [--podcast] [--horizontal] [--no-caption] <youtube-url>");
     logger.error("Example: npm run dev -- --ai https://youtube.com/watch?v=abc123");
     logger.error("  Default: vertical (9:16) + captions ON");
+    logger.error("  --podcast     Auto-detect 2 speakers → split-screen");
     logger.error("  --horizontal  Keep 16:9 format");
     logger.error("  --no-caption  Skip auto-captioning");
     process.exit(1);
@@ -82,12 +85,13 @@ async function runAIPipeline(): Promise<void> {
 
   const url = AI_URL;
   const ENABLE_CAPTION = !NO_CAPTION && config.caption.enabled;
-  const TOTAL_STEPS = 4 + (VERTICAL ? 1 : 0) + (ENABLE_CAPTION ? 1 : 0) + 1; // download + transcript + ai + cut + [vertical] + [caption] + organise
+  const TOTAL_STEPS = 4 + (VERTICAL ? 1 : 0) + (ENABLE_CAPTION ? 1 : 0) + 1;
 
+  const modeLabel = PODCAST_FLAG ? "PODCAST" : VERTICAL ? "VERTICAL 9:16" : "HORIZONTAL 16:9";
   logger.info(`\n${"=".repeat(60)}`);
   logger.info(`AI VIRAL CLIP DETECTION`);
   logger.info(`URL: ${url}`);
-  logger.info(`Format: ${VERTICAL ? "VERTICAL 9:16" : "HORIZONTAL 16:9"} | Caption: ${ENABLE_CAPTION ? "ON" : "OFF"}`);
+  logger.info(`Format: ${modeLabel} | Caption: ${ENABLE_CAPTION ? "ON" : "OFF"}`);
   logger.info(`${"=".repeat(60)}\n`);
 
   // ── 1. Download the full video ───────────────────────────
@@ -97,11 +101,11 @@ async function runAIPipeline(): Promise<void> {
 
   // ── 2. Get transcript ────────────────────────────────────
   logger.step(2, TOTAL_STEPS, "Fetching transcript/subtitles…");
-  const transcript = await getTranscript(url);
+  const transcript = await getTranscript(url, "en", downloaded);
 
   if (!transcript) {
-    logger.error("Could not retrieve transcript. AI analysis requires subtitles.");
-    logger.info("Tip: Make sure the video has captions (auto-generated or manual).");
+    logger.error("Could not retrieve transcript via YouTube subs or Whisper.");
+    logger.info("Tip: Ensure the video has audio for Whisper or captions on YouTube.");
     return;
   }
 
@@ -143,18 +147,36 @@ async function runAIPipeline(): Promise<void> {
     }
   }
 
-  // ── 5. Convert to vertical (default for AI mode) ──────────
+  // ── 5. Convert to vertical / podcast split-screen ───────
   let currentStep = 5;
   if (VERTICAL && clipFiles.length > 0) {
-    logger.step(currentStep, TOTAL_STEPS, "Converting clips to vertical (9:16) with face-detect crop…");
-    for (let i = 0; i < clipFiles.length; i++) {
-      const { clip, file } = clipFiles[i];
-      const vertFile = file.replace(".mp4", "_VERT.mp4");
-      try {
-        await formatVertical(file, vertFile, config.vertical);
-        clipFiles[i].file = vertFile;
-      } catch (err) {
-        logger.error(`  Failed to format vertical "${clip.title}":`, err);
+    if (PODCAST_FLAG) {
+      logger.step(currentStep, TOTAL_STEPS, "Auto-detecting speakers & formatting podcast…");
+
+      for (let i = 0; i < clipFiles.length; i++) {
+        const { clip, file } = clipFiles[i];
+        const outFile = file.replace(".mp4", "_PODCAST.mp4");
+        try {
+          await formatPodcast(file, outFile, {
+            ...DEFAULT_PODCAST_CONFIG,
+            ...config.podcast,
+          });
+          clipFiles[i].file = outFile;
+        } catch (err) {
+          logger.error(`  Failed to format podcast "${clip.title}":`, err);
+        }
+      }
+    } else {
+      logger.step(currentStep, TOTAL_STEPS, "Converting clips to vertical (9:16) with face-detect crop…");
+      for (let i = 0; i < clipFiles.length; i++) {
+        const { clip, file } = clipFiles[i];
+        const vertFile = file.replace(".mp4", "_VERT.mp4");
+        try {
+          await formatVertical(file, vertFile, config.vertical);
+          clipFiles[i].file = vertFile;
+        } catch (err) {
+          logger.error(`  Failed to format vertical "${clip.title}":`, err);
+        }
       }
     }
     currentStep++;
@@ -211,20 +233,34 @@ async function runAIPipeline(): Promise<void> {
   const { writeFileSync } = await import("node:fs");
   writeFileSync(reportPath, JSON.stringify(analysis, null, 2));
 
-  // Clean up intermediate files (source download, CLIP, VERT files)
-  const sourceFile = `./${baseName}.mp4`;
-  const intermediatePatterns = [sourceFile];
+  // Clean up ALL intermediate files — only keep final output in outputDir
+  const allIntermediates = new Set<string>();
+  allIntermediates.add(downloaded); // original download
   for (const { clip } of clipFiles) {
-    const slugTitle = clip.title.replace(/[^a-zA-Z0-9]+/g, "_");
+    const sanitised = clip.title.replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 50);
     const idx = analysis.clips.indexOf(clip) + 1;
-    const base = `${slugTitle}_CLIP${idx}`;
-    intermediatePatterns.push(`./${base}.mp4`);
-    intermediatePatterns.push(`./${base}_VERT.mp4`);
-    intermediatePatterns.push(`./${base}_VERT_CAP.mp4`);
+    // All possible intermediate filenames
+    allIntermediates.add(`./${sanitised}_CLIP${idx}.mp4`);
+    allIntermediates.add(`./${sanitised}_CLIP${idx}_VERT.mp4`);
+    allIntermediates.add(`./${sanitised}_CLIP${idx}_VERT_CAP.mp4`);
+    allIntermediates.add(`./${sanitised}_CLIP${idx}_PODCAST.mp4`);
+    allIntermediates.add(`./${sanitised}_CLIP${idx}_PODCAST_CAP.mp4`);
   }
-  for (const f of intermediatePatterns) {
+  for (const f of allIntermediates) {
     try { if (existsSync(f)) unlinkSync(f); } catch { /* ignore */ }
   }
+  // Cleanup temp dirs (preserve Whisper JSON cache in TEMP_SUBS for re-runs)
+  const { rmSync, readdirSync: readDir } = await import("node:fs");
+  try { rmSync("./TEMP_CAPTIONS", { recursive: true, force: true }); } catch { /* ignore */ }
+  try {
+    if (existsSync("./TEMP_SUBS")) {
+      for (const f of readDir("./TEMP_SUBS")) {
+        if (!f.endsWith("_whisper.json")) {
+          try { unlinkSync(`./TEMP_SUBS/${f}`); } catch { /* ignore */ }
+        }
+      }
+    }
+  } catch { /* ignore */ }
 
   logger.success(`\n${"=".repeat(60)}`);
   logger.success(`AI PIPELINE COMPLETE`);

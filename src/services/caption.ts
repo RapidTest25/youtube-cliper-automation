@@ -41,14 +41,14 @@ export interface CaptionConfig {
 
 export const DEFAULT_CAPTION_CONFIG: CaptionConfig = {
   model: "base",
-  maxWordsPerLine: 4,
-  fontSize: 22,
+  maxWordsPerLine: 3,
+  fontSize: 60,
   fontName: "Arial",
   primaryColor: "&H00FFFFFF",    // white
   outlineColor: "&H00000000",    // black
-  outlineWidth: 3,
-  shadowDepth: 1,
-  marginV: 60,
+  outlineWidth: 6,
+  shadowDepth: 3,
+  marginV: 200,
   bold: 1,
   highlightColor: "&H0000FFFF", // yellow
 };

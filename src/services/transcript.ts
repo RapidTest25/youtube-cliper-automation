@@ -1,5 +1,6 @@
 // ============================================================
 // Transcript Service — Download subtitles from YouTube
+// Falls back to Whisper transcription when no YouTube subs
 // ============================================================
 
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
@@ -11,13 +12,18 @@ import type { TranscriptSegment, VideoTranscript } from "../types.js";
 
 const TEMP_SUB_DIR = "./TEMP_SUBS";
 
+const WHISPER_BIN =
+  process.env.WHISPER_BIN ||
+  path.join(process.cwd(), ".venv", "bin", "whisper");
+
 /**
  * Download and parse transcript/subtitles for a YouTube video.
- * Tries: 1) Auto-generated subs  2) Manual subs  3) yt-dlp auto-sub
+ * Tries: 1) Manual subs  2) Auto-generated subs  3) Whisper on downloaded video
  */
 export async function getTranscript(
   videoUrl: string,
   preferredLang: string = "en",
+  videoFilePath?: string,
 ): Promise<VideoTranscript | null> {
   await mkdir(TEMP_SUB_DIR, { recursive: true });
 
@@ -32,7 +38,14 @@ export async function getTranscript(
   const fallback = await downloadSubtitles(videoUrl, preferredLang, true);
   if (fallback) return fallback;
 
-  logger.warn("No subtitles found for this video");
+  // Fallback 2: Use Whisper to transcribe the downloaded video
+  if (videoFilePath && existsSync(videoFilePath)) {
+    logger.warn("No YouTube subtitles found — falling back to Whisper transcription…");
+    const whisperTranscript = await whisperFallbackTranscript(videoFilePath);
+    if (whisperTranscript) return whisperTranscript;
+  }
+
+  logger.warn("No subtitles found and Whisper fallback unavailable");
   return null;
 }
 
@@ -173,12 +186,14 @@ function findVttFile(): string | null {
 }
 
 /**
- * Remove all files in the temp subs directory.
+ * Remove VTT files in the temp subs directory (preserve Whisper JSON cache).
  */
 function cleanTempSubs(): void {
   if (!existsSync(TEMP_SUB_DIR)) return;
   const files = readdirSync(TEMP_SUB_DIR);
   for (const f of files) {
+    // Keep Whisper JSON cache for reuse
+    if (f.endsWith(".json")) continue;
     try {
       unlinkSync(path.join(TEMP_SUB_DIR, f));
     } catch {
@@ -219,4 +234,129 @@ export function secondsToShortTimestamp(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// ────────────────────────────────────────────────────────────
+// Whisper Fallback Transcription
+// ────────────────────────────────────────────────────────────
+
+interface WhisperWord { word: string; start: number; end: number; }
+interface WhisperSegment { id: number; start: number; end: number; text: string; words?: WhisperWord[]; }
+
+/**
+ * Use OpenAI Whisper to transcribe the full video audio,
+ * then convert the result into a VideoTranscript.
+ */
+async function whisperFallbackTranscript(
+  videoPath: string,
+): Promise<VideoTranscript | null> {
+  try {
+    await mkdir(TEMP_SUB_DIR, { recursive: true });
+
+    const baseName = path.basename(videoPath, path.extname(videoPath));
+    const audioFile = path.join(TEMP_SUB_DIR, `${baseName}_whisper.wav`);
+    const jsonFile = path.join(TEMP_SUB_DIR, `${baseName}_whisper.json`);
+
+    // Check for cached Whisper JSON from a previous run
+    if (existsSync(jsonFile)) {
+      logger.info("Found cached Whisper transcription — reusing…");
+      const data = JSON.parse(readFileSync(jsonFile, "utf-8"));
+      const cached = parseWhisperJson(data);
+      if (cached) return cached;
+    }
+
+    // Check for any whisper JSON in temp dir (same video, different filename)
+    const existingJsons = readdirSync(TEMP_SUB_DIR).filter(f => f.endsWith("_whisper.json"));
+    if (existingJsons.length > 0) {
+      const cached = path.join(TEMP_SUB_DIR, existingJsons[0]);
+      logger.info(`Found cached Whisper transcription (${existingJsons[0]}) — reusing…`);
+      const data = JSON.parse(readFileSync(cached, "utf-8"));
+      const result = parseWhisperJson(data);
+      if (result) return result;
+    }
+
+    // 1. Extract audio (16kHz mono WAV for Whisper)
+    logger.info("Extracting audio for Whisper transcription…");
+    const extractResult = await runCommand("ffmpeg", [
+      "-y", "-i", videoPath,
+      "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+      audioFile,
+    ], { silent: true });
+
+    if (extractResult.exitCode !== 0) {
+      logger.error("Failed to extract audio for Whisper");
+      return null;
+    }
+
+    // 2. Run Whisper
+    const whisperModel = process.env.WHISPER_MODEL ?? "base";
+    const whisperLang = process.env.WHISPER_LANGUAGE ?? "id"; // default Indonesian
+    logger.info(`Running Whisper (model=${whisperModel}, lang=${whisperLang}) for full video transcription…`);
+    const whisperResult = await runCommand(WHISPER_BIN, [
+      audioFile,
+      "--model", whisperModel,
+      "--output_format", "json",
+      "--output_dir", TEMP_SUB_DIR,
+      "--word_timestamps", "True",
+      "--fp16", "False",
+      "--language", whisperLang,
+      "--condition_on_previous_text", "False",
+      "--threads", "4",
+    ], { silent: true });
+
+    if (whisperResult.exitCode !== 0) {
+      logger.error("Whisper transcription failed:", whisperResult.stderr.slice(0, 300));
+      return null;
+    }
+
+    // 3. Find & read JSON output
+    if (!existsSync(jsonFile)) {
+      // Whisper may name file differently — scan for any JSON
+      const jsons = readdirSync(TEMP_SUB_DIR).filter(f => f.endsWith(".json"));
+      if (jsons.length === 0) {
+        logger.error("Whisper produced no JSON output");
+        return null;
+      }
+      // Use the most recently created JSON
+      const altPath = path.join(TEMP_SUB_DIR, jsons[jsons.length - 1]);
+      if (existsSync(altPath)) {
+        const data = JSON.parse(readFileSync(altPath, "utf-8"));
+        return parseWhisperJson(data);
+      }
+      return null;
+    }
+
+    const data = JSON.parse(readFileSync(jsonFile, "utf-8"));
+    return parseWhisperJson(data);
+  } catch (err) {
+    logger.error("Whisper fallback failed:", err);
+    return null;
+  }
+}
+
+/**
+ * Parse Whisper JSON output into VideoTranscript format.
+ */
+function parseWhisperJson(data: { segments?: WhisperSegment[]; text?: string; language?: string }): VideoTranscript | null {
+  const raw = data.segments ?? [];
+  if (raw.length === 0) {
+    logger.warn("Whisper returned no segments");
+    return null;
+  }
+
+  const segments: TranscriptSegment[] = raw.map(s => ({
+    start: s.start,
+    end: s.end,
+    text: s.text.trim(),
+  }));
+
+  const duration = segments[segments.length - 1].end;
+  const fullText = segments.map(s => s.text).join(" ");
+  const language = data.language ?? "en";
+
+  logger.success(
+    `Whisper transcribed ${segments.length} segments (${language}, ${Math.round(duration)}s)`,
+  );
+
+  return { language, segments, fullText, duration };
 }
