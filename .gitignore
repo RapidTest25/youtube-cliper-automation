@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Temp files
+TEMP/
+TEMP_THUMBS/
+
+# Output files
+output/*.mp4
+output/*/
+thumbs/*.png
+thumbs/*.jpg
+
+# Secrets
+client_secrets.json
+token.json
+*.token
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Video files (don't commit large files)
+*.mp4
+*.avi
+*.mkv
+*.wav
+*.mp3
+
+# Logs
+*.log
+npm-debug.log*

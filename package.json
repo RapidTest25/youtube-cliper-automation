@@ -1,0 +1,38 @@
+{
+  "name": "youtube-cliper-automation",
+  "version": "1.0.0",
+  "description": "AI-powered YouTube clips automation — download, edit (silence removal), generate thumbnails, and upload clips automatically",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist TEMP TEMP_THUMBS"
+  },
+  "keywords": [
+    "youtube",
+    "clips",
+    "automation",
+    "video-editing",
+    "thumbnail",
+    "silence-removal",
+    "ffmpeg"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "csv-parse": "^5.6.0",
+    "googleapis": "^144.0.0",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
