@@ -6,6 +6,8 @@ dist/
 
 # Temp files
 TEMP/
+TEMP_SUBS/
+TEMP_CAPTIONS/
 TEMP_THUMBS/
 
 # Output files

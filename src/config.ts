@@ -2,6 +2,8 @@
 // Default configuration for YouTube Cliper Automation
 // ============================================================
 
+import "dotenv/config";
+
 export const DEFAULT_CONFIG = {
   editor: {
     silentThreshold: -30,
@@ -40,6 +42,37 @@ export const DEFAULT_CONFIG = {
     assetsDir: "./assets",
     openingVideo: "./assets/opening.mp4",
     endingVideo: "./assets/ending.mp4",
+  },
+
+  ai: {
+    apiKey: process.env.GROQ_API_KEY ?? "",
+    model: process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    maxClips: parseInt(process.env.AI_MAX_CLIPS ?? "5", 10),
+    minClipDuration: parseInt(process.env.AI_MIN_CLIP_DURATION ?? "30", 10),
+    maxClipDuration: parseInt(process.env.AI_MAX_CLIP_DURATION ?? "60", 10),
+  },
+
+  vertical: {
+    width: 1080,
+    height: 1920,
+    cropStrategy: "face-detect" as const,
+    videoBitrate: "6000k",
+    frameRate: 30,
+  },
+
+  caption: {
+    enabled: (process.env.CAPTION_ENABLED ?? "true") === "true",
+    model: process.env.WHISPER_MODEL ?? "base",
+    maxWordsPerLine: 4,
+    fontSize: 22,
+    fontName: "Arial",
+    primaryColor: "&H00FFFFFF",
+    outlineColor: "&H00000000",
+    outlineWidth: 3,
+    shadowDepth: 1,
+    marginV: 60,
+    bold: 1,
+    highlightColor: "&H0000FFFF",
   },
 };
 
